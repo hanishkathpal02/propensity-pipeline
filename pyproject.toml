@@ -1,0 +1,26 @@
+[project]
+name = "propensity"
+version = "2.0.0"
+description = "Customer purchase-propensity pipeline (star-schema, Airflow-orchestrated)"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas",
+    "numpy",
+    "lightgbm",
+    "scikit-learn",
+    "psycopg2-binary",
+    "boto3",
+    "requests",
+    "python-dotenv",
+    "matplotlib",
+]
+
+# Airflow itself is NOT a dependency here — it is installed in the Airflow
+# environment (the worker), which imports this package to run task callables.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

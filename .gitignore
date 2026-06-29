@@ -1,0 +1,30 @@
+# secrets / keys — NEVER commit
+.env
+*.env
+config/id_rsa_*
+**/id_rsa_*
+
+# data / model artifacts
+*.pkl
+checkpoints/
+output_files/
+upload_files/
+
+# logs
+logs/
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# IDE / OS
+.spyproject/
+.idea/
+.vscode/
+.DS_Store
