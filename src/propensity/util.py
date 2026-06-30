@@ -5,6 +5,7 @@ helpers, and date-batching (unused by the pipeline). Console logging only, so
 Airflow captures it via stdout.
 """
 import logging
+import sys
 from datetime import datetime, timedelta
 
 import pytz
@@ -28,7 +29,7 @@ def setup_logger(name: str = "propensity") -> logging.Logger:
     log = logging.getLogger(name)
     log.setLevel(logging.INFO)
     if not log.handlers:
-        handler = logging.StreamHandler()
+        handler = logging.StreamHandler(sys.stdout)  # stdout -> Airflow logs as INFO (not ERROR)
         handler.setFormatter(_TZFormatter(
             "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S %Z%z",
