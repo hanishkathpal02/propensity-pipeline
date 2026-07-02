@@ -70,7 +70,7 @@ def analysis(country: str, run_date: str):
     _, _, train_end = _resolve_dates(run_date)
     model = artifacts.load_model(country, run_date)
     scored = artifacts.load_df(country, run_date, _SCORED)
-    save_analysis(model, scored, train_end, params.LABEL_WINDOW, OUTPUT_DIR / country, country)
+    save_analysis(model, scored, train_end, params.LABEL_WINDOW, OUTPUT_DIR / country / run_date, country)
 
 
 def verify(country: str, run_date: str):
