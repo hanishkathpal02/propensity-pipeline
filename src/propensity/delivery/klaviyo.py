@@ -31,6 +31,7 @@ def _build_payload(row: dict) -> dict:
     props["prop_model_version"] = row.get("prop_model_version", MODEL_VERSION)
     props["prop_scored_at"]     = row.get("prop_scored_at")
     props["test_bucket"]        = row.get("test_bucket")
+    props["propensity_source"]  = True   # flag so Klaviyo can identify propensity-pipeline profiles
 
     return {"data": {"type": "profile",
                      "attributes": {"email": row["email"], "properties": props}}}
