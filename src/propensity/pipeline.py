@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from propensity.config import params
-from propensity.config.settings import KLAVIYO_API_KEY
+from propensity.config.settings import klaviyo_api_key
 from propensity.delivery.klaviyo import sync_profiles_to_klaviyo
 from propensity.delivery.profiles import build_top3_profiles
 from propensity.features.build import build_training_frame
@@ -88,5 +88,8 @@ def build_profiles(country: str, run_date: str):
 
 def sync_klaviyo(country: str, run_date: str, dry_run: bool = True):
     profiles = artifacts.load_df(country, run_date, _PROFILES)
-    result = sync_profiles_to_klaviyo(profiles, KLAVIYO_API_KEY, dry_run=dry_run)
+    api_key = klaviyo_api_key(country)          # per-geo account (prod) / shared sandbox (dev)
+    if not dry_run and not api_key:
+        raise ValueError(f"No Klaviyo key for {country}: set KLAVIYO_API_KEY_{country.upper()} (ENV=prod)")
+    result = sync_profiles_to_klaviyo(profiles, api_key, dry_run=dry_run)
     logger.info(f"Klaviyo sync result: {result}")

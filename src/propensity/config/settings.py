@@ -36,8 +36,11 @@ S3_CONFIG = {
     "bucket":                os.getenv("BUCKET_NAME"),
 }
 
-# Klaviyo Profile API — sandbox key in dev, production key in prod.
-KLAVIYO_API_KEY = (
-    os.getenv("KLAVIYO_SANDBOX_API_KEY") if ENV == "dev"
-    else os.getenv("KLAVIYO_API_KEY")
-)
+# Klaviyo Profile API — a SEPARATE production account/key per geo; one shared sandbox for dev.
+#   dev  -> KLAVIYO_SANDBOX_API_KEY        (single sandbox; dev runs are dry-run anyway)
+#   prod -> KLAVIYO_API_KEY_<COUNTRY>      (one Klaviyo account per geo, e.g. KLAVIYO_API_KEY_US)
+def klaviyo_api_key(country: str) -> str:
+    """Klaviyo key for a geo: sandbox in dev, the per-country production account in prod."""
+    if ENV == "dev":
+        return os.getenv("KLAVIYO_SANDBOX_API_KEY")
+    return os.getenv(f"KLAVIYO_API_KEY_{country.upper()}")
