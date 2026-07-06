@@ -21,6 +21,9 @@ TRAIN_END_DATE     = None           # None -> today - 30d (resolved at runtime)
 LOOKBACK_WINDOW    = 30             # aggregate behaviour over the prior N days
 LABEL_WINDOW       = 30             # ordered within the next N days = positive label
 SNAPSHOT_FREQUENCY = "7D"           # snapshot cadence
+# Evaluation split: validation uses snapshots in (train_end, run_date - LABEL_WINDOW] so their
+# labels are FULLY MATURE. train_end defaults to run_date - LABEL_WINDOW - VALIDATION_WINDOW.
+VALIDATION_WINDOW  = 30             # width (days) of the mature validation window
 
 # Model version stamped onto Klaviyo profiles.
 # v2 = star-schema source; funnel features are flag-based (not raw counts) and

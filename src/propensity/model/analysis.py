@@ -28,17 +28,18 @@ def _band(score: float) -> str:
     return "low"
 
 
-def save_analysis(model, scored_df, train_end_date, label_window, output_dir: Path, country: str) -> None:
+def save_analysis(model, scored_df, train_end_date, mature_cutoff_date, label_window, output_dir: Path, country: str) -> None:
     """Write ROC / score-dist / lift / importance plots + metric CSVs to output_dir/analysis/.
 
-    Derives the validation split from the scored frame (snapshot_date > train_end_date)
-    and uses the stored propensity_score — so it needs no separate X_val/y_val artifacts.
+    Validation slice = (train_end_date, mature_cutoff_date] — mature labels only — matching
+    the model's own train/val split, so the reported metrics aren't biased by immature labels.
     """
     out = Path(output_dir) / "analysis"
     out.mkdir(parents=True, exist_ok=True)
 
     lc = label_col(label_window)
-    val = scored_df[scored_df["snapshot_date"] > pd.Timestamp(train_end_date)]
+    snap = pd.to_datetime(scored_df["snapshot_date"])
+    val = scored_df[(snap > pd.Timestamp(train_end_date)) & (snap <= pd.Timestamp(mature_cutoff_date))]
     y_val   = val[lc].astype(int).reset_index(drop=True)
     y_score = val["propensity_score"].reset_index(drop=True).to_numpy()
     base_rate = float(y_val.mean())

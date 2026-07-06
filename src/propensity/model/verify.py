@@ -12,9 +12,12 @@ within 30 days of the snapshot -> compare predicted vs purchased category.
 import psycopg2
 import pandas as pd
 
+from propensity.config.params import SCORE_BANDS
 from propensity.config.settings import REDSHIFT_CONFIG
 from propensity.io import s3
 from propensity.util import logger
+
+_MED, _HIGH = SCORE_BANDS["medium"], SCORE_BANDS["high"]   # keep buckets consistent with delivery bands
 
 _TEMP = "temp_propensity_verify"
 
@@ -49,21 +52,21 @@ WHERE EXISTS (
     SELECT 1 FROM {temp} t
     WHERE lower(at.customer_email) = lower(t.email)
       AND at.purchase_date >= t.snapshot_date
-      AND at.purchase_date <= t.snapshot_date + INTERVAL '30 days'
+      AND at.purchase_date <= t.snapshot_date + INTERVAL '{label_window} days'
 )
 AND at.customer_email NOT ILIKE '%angara.com%'
 AND dp.product_category IS NOT NULL
 """
 
 
-def _actual_purchases(object_key: str, country: str) -> pd.DataFrame:
+def _actual_purchases(object_key: str, country: str, label_window: int) -> pd.DataFrame:
     """Temp table + COPY + verification query, all in one session (temp tables are session-scoped)."""
     conn = psycopg2.connect(**REDSHIFT_CONFIG)
     try:
         cur = conn.cursor()
         cur.execute(_TEMP_DDL.format(temp=_TEMP))
         cur.execute(_COPY.format(temp=_TEMP, path=s3.s3_uri(object_key), cred=s3.credentials_clause()))
-        cur.execute(_VERIFICATION_QUERY.format(temp=_TEMP, country=country))
+        cur.execute(_VERIFICATION_QUERY.format(temp=_TEMP, country=country, label_window=label_window))
         cols = [d[0] for d in cur.description]
         data = cur.fetchall()
         cur.close()
@@ -75,12 +78,13 @@ def _actual_purchases(object_key: str, country: str) -> pd.DataFrame:
         conn.close()
 
 
-def build_verification(df_features: pd.DataFrame, country: str) -> pd.DataFrame:
+def build_verification(df_features: pd.DataFrame, country: str, label_window: int) -> pd.DataFrame:
     """One row per email (top score), with whether they actually bought that category."""
     df = df_features.copy()
+    # buckets aligned to config.SCORE_BANDS (same low/medium/high used for Klaviyo delivery)
     df["propensity_bucket"] = pd.cut(
-        df["propensity_score"], bins=[0, 0.3, 0.7, 0.9, 1.0],
-        labels=["Low (0-0.3)", "Medium (0.3-0.7)", "High (0.7-0.9)", "Super High(>0.9)"],
+        df["propensity_score"], bins=[0, _MED, _HIGH, 1.01],
+        labels=["low", "medium", "high"], right=False, include_lowest=True,
     )
     df["email"] = df["email"].str.lower()
 
@@ -91,7 +95,7 @@ def build_verification(df_features: pd.DataFrame, country: str) -> pd.DataFrame:
 
     object_key = s3.upload_df(df, "propensity_verify")
     try:
-        actual = _actual_purchases(object_key, country)
+        actual = _actual_purchases(object_key, country, label_window)
     finally:
         s3.delete(object_key)
 

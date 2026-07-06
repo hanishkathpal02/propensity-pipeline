@@ -75,7 +75,7 @@ def _poll_jobs(job_ids, headers, max_wait_s: int = 600, interval_s: int = 10) ->
 
 
 def sync_profiles_to_klaviyo(df_profiles, api_key: str, dry_run: bool = True,
-                             batch_size: int = BULK_MAX, poll: bool = True,
+                             batch_size: int = 5_000, poll: bool = True,
                              rate_limit_sleep: float = 0.3) -> dict:
     """Bulk-upsert profiles to Klaviyo. dry_run=True builds payloads + logs a sample, sends nothing."""
     headers = {

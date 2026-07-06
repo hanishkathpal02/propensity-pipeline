@@ -72,6 +72,18 @@ the as-of date for snapshots, the model folder, and the fact-load upper bound. *
 `--logical-date` needed**; just trigger the DAG. To force a specific as-of day (e.g. a
 backfill), set the Airflow Variable `propensity_run_date_override=YYYY-MM-DD`.
 
+## Training & evaluation window
+The model retrains on the **full history** every run. The train/validation split uses
+**mature labels only** (so metrics and early-stopping aren't biased by unobserved future
+orders). With `run_date` as the as-of day and `LABEL_WINDOW = 30`:
+- **train** = snapshots ≤ `train_end` (default `run_date − LABEL_WINDOW − VALIDATION_WINDOW`);
+- **validation** = snapshots in `(train_end, run_date − LABEL_WINDOW]` — their label window has
+  fully elapsed, so reported AUC / precision / recall and early-stopping are trustworthy;
+- snapshots **newer than `run_date − LABEL_WINDOW`** have incomplete labels — they are **scored**
+  (the latest snapshot per email drives the Klaviyo push) but **excluded from train/validation**.
+
+Tune via `LABEL_WINDOW` / `VALIDATION_WINDOW` in `config/params.py`.
+
 ## Run locally
 
 ```bash
@@ -91,6 +103,7 @@ its own dated folder (no overwrite).
 | Add a country / geo | `config/params.py` `COUNTRY_LIST` **and** `GEO_UTC_OFFSET_HOURS`; add `KLAVIYO_API_KEY_<CC>` (that geo's Klaviyo account); then warehouse grants + backfill |
 | Retune the score bands (high/medium/low) | `config/params.py` `SCORE_BANDS` |
 | Change feature windows (lookback / label / snapshot freq) | `config/params.py` |
+| Change the train/validation split | `config/params.py` `LABEL_WINDOW` (label maturity) + `VALIDATION_WINDOW`; split logic in `model/train.py` (validation is mature labels only) |
 | Change model version stamp | `config/params.py` `MODEL_VERSION` |
 | Add / change a model feature | `features/build.py` (`FEATURE_COLS` + aggregation) **and** the read query in `io/read.py`; if it's a new raw column, also add it to the fact (`warehouse/ddl/*` + the proc) |
 | Change read SQL / add a source table | `io/read.py` + a new `warehouse/ddl/*.sql` + `warehouse/procs/*.sql` |

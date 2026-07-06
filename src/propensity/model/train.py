@@ -30,8 +30,12 @@ LGB_PARAMS = {
 }
 
 
-def train_model(df_features: pd.DataFrame, train_end_date, label_window: int):
+def train_model(df_features: pd.DataFrame, train_end_date, mature_cutoff_date, label_window: int):
     """Time-split train/validation, fit LightGBM, score the full frame.
+
+    Validation is (train_end, mature_cutoff] so its labels are FULLY MATURE (no leakage and
+    no immature-label bias). Snapshots after mature_cutoff are excluded from train/val but
+    still scored (predict runs on the full frame) for delivery.
 
     Returns (model, X_train, X_val, y_train, y_val, df_features_with_score).
     """
@@ -41,10 +45,13 @@ def train_model(df_features: pd.DataFrame, train_end_date, label_window: int):
     for col in CATEGORICAL_COLS:
         X[col] = X[col].astype("category")
 
-    # Time-based split — validate on snapshots after the cutoff (no leakage).
-    train_mask = df_features["snapshot_date"] <= pd.Timestamp(train_end_date)
+    # Time-based split. train ≤ train_end; validate on (train_end, mature_cutoff] only
+    # (mature labels). Snapshots > mature_cutoff are neither trained nor validated on.
+    snap = df_features["snapshot_date"]
+    train_mask = snap <= pd.Timestamp(train_end_date)
+    val_mask   = (snap > pd.Timestamp(train_end_date)) & (snap <= pd.Timestamp(mature_cutoff_date))
     X_train, y_train = X[train_mask], y[train_mask]
-    X_val,   y_val   = X[~train_mask], y[~train_mask]
+    X_val,   y_val   = X[val_mask],   y[val_mask]
 
     logger.info(f"Train: {X_train.shape}  Val: {X_val.shape}")
     logger.info(f"Train labels: {y_train.value_counts().to_dict()}")
