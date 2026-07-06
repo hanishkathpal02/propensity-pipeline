@@ -20,7 +20,7 @@ src/propensity/       # the Python ML package (installable; imported by Airflow 
   io/                 #   read.py (star queries), redshift.py, s3.py, freshness.py, artifacts.py
   features/           #   build.py — snapshots, labels, cleaning
   model/              #   train.py, analysis.py, verify.py
-  delivery/           #   profiles.py (top-3 wide), klaviyo.py (sync)
+  delivery/           #   profiles.py (top-3 wide), klaviyo.py (bulk profile-import, per-geo)
   pipeline.py         #   task callables (one per DAG step)
   util.py             #   logger + date helpers
 dags/                 # Airflow DAGs (thin — orchestration only)
@@ -28,17 +28,49 @@ scripts/run_local.py  # run the whole pipeline locally (Klaviyo dry-run)
 pyproject.toml        # makes `propensity` importable: from propensity.model import ...
 ```
 
+## How Airflow and the package communicate
+
+Design is **thin DAG, fat package**: Airflow only *orchestrates*; all logic lives in the
+`propensity` package. The package has **no Airflow dependency** — it runs standalone
+(`scripts/run_local.py`). They connect through three channels:
+
+1. **Import + function calls.** The DAG does `from propensity import pipeline` and each
+   PythonOperator calls one function (e.g. `pipeline.build_features(country, run_date)`).
+   On the EC2 the repo is bind-mounted and on `PYTHONPATH`, so `import propensity` resolves.
+2. **Secrets + DB.** The package reads credentials via `os.getenv(...)` in
+   `config/settings.py` (Airflow injects them as env vars); the SQL tasks reach Redshift via
+   the Airflow-managed `redshift_default` connection.
+3. **Data hand-off = the artifact store, not XCom.** Tasks are separate processes, so large
+   frames pass through files in `io/artifacts.py`, keyed by `(country, run_date)` — task A
+   writes `features.parquet`, task B reads it. (XCom carries only small values, e.g. the
+   dates from `resolve_dates`.)
+
+The warehouse SQL in `warehouse/` is **not executed by the pipeline** — the procs/tables live
+in Redshift (deployed manually from those files, which are the version-controlled source of
+truth); the DAG just `CALL`s the procs by name.
+
 ## Pipeline shape (DAG)
 
 ```
-load_dim ─┐
-load_fact_propensity_category ─┼─► analyze ─► freshness_gate ─► build_features ─► train_score ─┬─► analysis
-load_fact_subscription ─┤                          (→features.parquet)  (→model.pkl, scored)  ├─► verify
-load_fact_klaviyo_engagements ─┘                                                              └─► build_profiles ─► sync_klaviyo
+resolve_dates ─► load_dim ─┐
+                 load_fact_propensity_category ─┼─► analyze ─► freshness_gate ─► build_features ─► train_score ─┬─► analysis
+                 load_fact_subscription ─┤                     (→features.parquet)  (→model.pkl, scored)        ├─► verify
+                 load_fact_klaviyo_engagements ─┘                                                               └─► build_profiles ─► sync_klaviyo
 ```
-- The four warehouse refreshes are `CALL` tasks (run inside Redshift, in parallel).
+- **`resolve_dates`** runs first and freezes the run's dates in XCom (see *Run dates* below),
+  so every task — and any later single-task re-run — shares one as-of date.
+- The four warehouse refreshes are `CALL` tasks (run inside Redshift, in parallel). They are
+  **self-watermarking**: each derives its load `FROM` from the table's own `MAX(date) − 3d`,
+  so the load is **gap-free at any cadence** (daily, 14-day, or after a missed run).
 - Everything from `build_features` on is a PythonOperator in `pipeline.py`; steps pass
   data via the artifact store (`io/artifacts.py`), so each is independently retryable.
+
+## Run dates (as-of)
+`resolve_dates` computes **`run_date` = the latest *completed* day in the geo's timezone**
+("geo yesterday", from `GEO_UTC_OFFSET_HOURS` in `config/params.py`) and freezes it — that's
+the as-of date for snapshots, the model folder, and the fact-load upper bound. **No
+`--logical-date` needed**; just trigger the DAG. To force a specific as-of day (e.g. a
+backfill), set the Airflow Variable `propensity_run_date_override=YYYY-MM-DD`.
 
 ## Run locally
 
@@ -47,14 +79,16 @@ pip install -e .                 # install package + deps
 cp .env.example .env             # then fill in credentials (gitignored)
 python scripts/run_local.py US   # full pipeline; Klaviyo is DRY-RUN (sends nothing)
 ```
-Outputs: artifacts → `$PROPENSITY_ARTIFACTS_DIR` (default `/tmp/propensity_artifacts`);
-plots/CSVs → `$PROPENSITY_OUTPUT_DIR` (default `/tmp/propensity_output`).
+Outputs are keyed by `(country, run_date)`: artifacts (`model.pkl`, `*.parquet`) →
+`$PROPENSITY_ARTIFACTS_DIR/<country>/<run_date>/`; analysis plots/CSVs →
+`$PROPENSITY_OUTPUT_DIR/<country>/<run_date>/analysis/` (defaults under `/tmp`). Each run keeps
+its own dated folder (no overwrite).
 
 ## Where to add what
 
 | I want to… | Edit |
 |---|---|
-| Add a country / geo | `config/params.py` `COUNTRY_LIST` → then warehouse grants + backfill for it; `dags` country |
+| Add a country / geo | `config/params.py` `COUNTRY_LIST` **and** `GEO_UTC_OFFSET_HOURS`; add `KLAVIYO_API_KEY_<CC>` (that geo's Klaviyo account); then warehouse grants + backfill |
 | Retune the score bands (high/medium/low) | `config/params.py` `SCORE_BANDS` |
 | Change feature windows (lookback / label / snapshot freq) | `config/params.py` |
 | Change model version stamp | `config/params.py` `MODEL_VERSION` |
@@ -65,9 +99,11 @@ plots/CSVs → `$PROPENSITY_OUTPUT_DIR` (default `/tmp/propensity_output`).
 | Change the Klaviyo payload / profile shape | `delivery/profiles.py` (wide format) + `delivery/klaviyo.py` (payload) |
 | Add / reorder a pipeline step | add a fn in `pipeline.py`, wire it in `dags/propensity_dag.py` |
 | Change a warehouse table | `warehouse/ddl/*.sql` + `warehouse/procs/*.sql` (re-register proc, re-backfill) |
-| Change credentials / connections | `.env` (template in `.env.example`); read in `config/settings.py` |
+| Change credentials / connections | `.env` (template in `.env.example`); read in `config/settings.py`. Klaviyo is **per-geo**: `KLAVIYO_API_KEY_<CC>` (prod), `KLAVIYO_SANDBOX_API_KEY` (dev) |
 | Move the artifact store to S3 | `io/artifacts.py` (swap the read/write bodies; callers unchanged) |
-| Go live to Klaviyo (stop dry-run) | `dags/propensity_dag.py` → `sync_klaviyo` `dry_run=False` |
+| Go live to Klaviyo (stop dry-run) | set Airflow **Variable `propensity_sync_dry_run=false`**, then re-run the `sync_klaviyo` task (no code change) |
+| Force a specific run / as-of date | set Airflow **Variable `propensity_run_date_override=YYYY-MM-DD`** (else = geo latest-completed day) |
+| Change run cadence / schedule | `dags/propensity_dag.py` `schedule` (currently `None` = manual; run ~every 14 days) |
 
 ## Deploy to Airflow (EC2)
 
@@ -76,9 +112,11 @@ plots/CSVs → `$PROPENSITY_OUTPUT_DIR` (default `/tmp/propensity_output`).
    `import propensity`.
 2. **Connection**: Airflow → Admin → Connections → `redshift_default`
    (Amazon Redshift; host / db `dev` / user / password / port 5439).
-3. **Env vars**: provide `REDSHIFT_*_DEV`, `AWS_*`, `KLAVIYO_*` to the worker
-   (a `.env` at the worker working dir, or Airflow env vars). Set
-   `PROPENSITY_ARTIFACTS_DIR` / `PROPENSITY_OUTPUT_DIR` to durable paths (not `/tmp`).
+3. **Env vars**: provide `REDSHIFT_*_DEV`, `AWS_*`, and Klaviyo keys to the worker.
+   Klaviyo is **per-geo**: `KLAVIYO_SANDBOX_API_KEY` (used when `ENV=dev`) and one
+   `KLAVIYO_API_KEY_<CC>` per geo for prod (e.g. `KLAVIYO_API_KEY_US`) — each key needs the
+   **`profiles:write`** scope. Set `PROPENSITY_ARTIFACTS_DIR` / `PROPENSITY_OUTPUT_DIR` to
+   durable paths (not `/tmp`).
 4. **Redshift grants** for the Airflow DB user (procs run SECURITY INVOKER — caller's perms):
    ```sql
    GRANT USAGE ON SCHEMA propensity, profiles TO <airflow_user>;
@@ -90,8 +128,12 @@ plots/CSVs → `$PROPENSITY_OUTPUT_DIR` (default `/tmp/propensity_output`).
      propensity.sp_load_fact_klaviyo_engagements(varchar,date,date) TO <airflow_user>;
    GRANT USAGE ON DATABASE shared_klaviyo TO <airflow_user>;   -- datashare (klaviyo proc)
    ```
-5. **Trigger** the `propensity_pipeline` DAG. `sync_klaviyo` stays **dry-run** until you
-   set `dry_run=False` in the DAG.
+5. **Trigger** the `propensity_pipeline` DAG — `airflow dags trigger propensity_pipeline`
+   (no `--logical-date`; `resolve_dates` picks the geo latest-completed day). The DAG is
+   `schedule=None` (manual), intended ~every 14 days. `sync_klaviyo` stays **dry-run** until
+   you set Variable `propensity_sync_dry_run=false` and re-run just that task. Klaviyo is
+   delivered via **bulk profile-import jobs** (≤10k/job, upsert), and every profile carries
+   `propensity_source=true` so the Klaviyo team can identify pipeline-sourced profiles.
 
 ## Notes
 - v2 is sourced from the `reporting` star schema; funnel features are flag-based (not raw
