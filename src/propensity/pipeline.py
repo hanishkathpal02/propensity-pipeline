@@ -86,10 +86,12 @@ def build_profiles(country: str, run_date: str):
     artifacts.save_df(profiles, country, run_date, _PROFILES)
 
 
-def sync_klaviyo(country: str, run_date: str, dry_run: bool = True):
+def sync_klaviyo(country: str, run_date: str, dry_run=True):
+    # dry_run may arrive as a string (Airflow Variable/param). Default to DRY unless explicitly false.
+    dry = str(dry_run).strip().lower() not in ("false", "0", "no", "off")
     profiles = artifacts.load_df(country, run_date, _PROFILES)
     api_key = klaviyo_api_key(country)          # per-geo account (prod) / shared sandbox (dev)
-    if not dry_run and not api_key:
+    if not dry and not api_key:
         raise ValueError(f"No Klaviyo key for {country}: set KLAVIYO_API_KEY_{country.upper()} (ENV=prod)")
-    result = sync_profiles_to_klaviyo(profiles, api_key, dry_run=dry_run)
-    logger.info(f"Klaviyo sync result: {result}")
+    result = sync_profiles_to_klaviyo(profiles, api_key, dry_run=dry)
+    logger.info(f"Klaviyo sync (dry_run={dry}) result: {result}")

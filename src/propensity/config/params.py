@@ -7,6 +7,11 @@ Kept separate from settings.py so secrets and run-parameters don't mix.
 # Geos to score. Add countries as warehouse + Klaviyo coverage expands.
 COUNTRY_LIST = ["US"]
 
+# Per-geo UTC offset (hours) used to derive that geo's calendar date from the run's
+# logical timestamp — must match how reporting.dim_date.full_date buckets days per geo.
+# NOTE: fixed offsets (no DST), matching the reporting layer. Add a geo when you add it.
+GEO_UTC_OFFSET_HOURS = {"US": -8, "CA": -4}
+
 # Data / training window
 START_DATE         = "2024-01-01"   # snapshots + fact backfill start here
 END_DATE           = None           # None -> today (resolved at runtime)

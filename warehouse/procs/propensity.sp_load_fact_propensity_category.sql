@@ -1,21 +1,31 @@
 -- propensity.sp_load_fact_propensity_category
--- Incremental, trailing-reprocess load. Same proc does backfill and daily refresh.
---   Backfill : CALL propensity.sp_load_fact_propensity_category('US', DATE '2024-01-01', CURRENT_DATE + 1);
---   Daily    : CALL propensity.sp_load_fact_propensity_category('US', CURRENT_DATE - 3, CURRENT_DATE + 1);
+-- Self-watermarking incremental load. FROM is derived from the table's own high-water
+-- mark (MAX(date) - 3d overlap), so it is gap-free at ANY run cadence (daily, 14-day, or
+-- after a missed/failed run). TO is the exclusive upper bound (pass the geo latest-completed
+-- day + 1). Empty table -> loads from p_backfill_start (full backfill).
+--   Normal   : CALL propensity.sp_load_fact_propensity_category('US', DATE '2026-07-06', DATE '2024-01-01');
+--   Backfill : DELETE the country's rows first (so MAX is NULL), then CALL as above.
 --   Then     : ANALYZE propensity.fact_propensity_category;   (separate statement)
--- p_to_date is an EXCLUSIVE upper bound — pass CURRENT_DATE + 1 to include today.
 
 CREATE OR REPLACE PROCEDURE propensity.sp_load_fact_propensity_category(
-    p_country   VARCHAR,
-    p_from_date DATE,
-    p_to_date   DATE
+    p_country        VARCHAR,
+    p_to_date        DATE,
+    p_backfill_start DATE
 )
 AS $$
+DECLARE
+    v_from DATE;
 BEGIN
+    -- high-watermark: continue from where the table ends, minus a 3-day overlap
+    v_from := COALESCE(
+        (SELECT MAX(date) FROM propensity.fact_propensity_category WHERE country = p_country) - 3,
+        p_backfill_start
+    );
+
     -- idempotent: clear the window for this country, then reload it
     DELETE FROM propensity.fact_propensity_category
     WHERE country = p_country
-      AND date >= p_from_date
+      AND date >= v_from
       AND date <  p_to_date;
 
     INSERT INTO propensity.fact_propensity_category
@@ -44,8 +54,8 @@ BEGIN
     LEFT JOIN reporting.dim_order    dord  ON f.order_id    = dord.order_id
     WHERE f.country = p_country
       -- prune on the fact's own date_id (zone-map friendly); dim_date join still gives full_date
-      AND f.date_id >= CAST(TO_CHAR(p_from_date, 'YYYYMMDD') AS INT)
-      AND f.date_id <  CAST(TO_CHAR(p_to_date,   'YYYYMMDD') AS INT)
+      AND f.date_id >= CAST(TO_CHAR(v_from,    'YYYYMMDD') AS INT)
+      AND f.date_id <  CAST(TO_CHAR(p_to_date, 'YYYYMMDD') AS INT)
       AND dp.product_category IS NOT NULL
     GROUP BY dt.full_date, dv.visitor_id_actual, f.country,
              dp.product_category, ddev.device_name, dcmp.channel;
