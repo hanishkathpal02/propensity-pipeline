@@ -109,7 +109,7 @@ its own dated folder (no overwrite).
 | Add a country / geo | `config/params.py` `COUNTRY_LIST` **and** `GEO_UTC_OFFSET_HOURS`; add `KLAVIYO_API_KEY_<CC>` (that geo's Klaviyo account); then warehouse grants + backfill |
 | Retune the score bands (high/medium/low) | `config/params.py` `SCORE_BANDS` |
 | Change feature windows (lookback / label / snapshot freq) | `config/params.py` |
-| Change the train/validation split | `config/params.py` `LABEL_WINDOW` (label maturity) + `VALIDATION_WINDOW`; split logic in `model/train.py` (validation is mature labels only) |
+| Change the train/validation split | `config/params.py` `LABEL_WINDOW` (label maturity) + `VALIDATION_WINDOW` + `REFIT_ON_ALL_MATURE`; split/refit logic in `model/train.py` |
 | Change model version stamp | `config/params.py` `MODEL_VERSION` |
 | Add / change a model feature | `features/build.py` (`FEATURE_COLS` + aggregation) **and** the read query in `io/read.py`; if it's a new raw column, also add it to the fact (`warehouse/ddl/*` + the proc) |
 | Change read SQL / add a source table | `io/read.py` + a new `warehouse/ddl/*.sql` + `warehouse/procs/*.sql` |
