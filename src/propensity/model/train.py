@@ -30,14 +30,24 @@ LGB_PARAMS = {
 }
 
 
-def train_model(df_features: pd.DataFrame, train_end_date, mature_cutoff_date, label_window: int):
+def _lgb_params(y):
+    vc = y.value_counts()
+    return dict(LGB_PARAMS, scale_pos_weight=vc.get(0, 1) / max(vc.get(1, 1), 1))
+
+
+def train_model(df_features: pd.DataFrame, train_end_date, mature_cutoff_date,
+                label_window: int, refit_all_mature: bool = False):
     """Time-split train/validation, fit LightGBM, score the full frame.
 
     Validation is (train_end, mature_cutoff] so its labels are FULLY MATURE (no leakage and
     no immature-label bias). Snapshots after mature_cutoff are excluded from train/val but
     still scored (predict runs on the full frame) for delivery.
 
-    Returns (model, X_train, X_val, y_train, y_val, df_features_with_score).
+    If `refit_all_mature`, a second model is fit on ALL mature data (train + val) for the
+    early-stopped iteration count and used for scoring/delivery — while the FIRST model
+    (train-only) is returned as `eval_model` for HONEST held-out metrics.
+
+    Returns (final_model, eval_model, X_val, y_val, df_features_with_score).
     """
     lc = label_col(label_window)
     X = df_features[FEATURE_COLS].copy()
@@ -57,11 +67,9 @@ def train_model(df_features: pd.DataFrame, train_end_date, mature_cutoff_date, l
     logger.info(f"Train labels: {y_train.value_counts().to_dict()}")
     logger.info(f"Val   labels: {y_val.value_counts().to_dict()}")
 
-    vc = y_train.value_counts()
-    params = dict(LGB_PARAMS, scale_pos_weight=vc.get(0, 1) / max(vc.get(1, 1), 1))
-
-    model = lgb.train(
-        params=params,
+    # eval_model: fit on train only, early-stop on the mature val -> honest held-out metrics
+    eval_model = lgb.train(
+        params=_lgb_params(y_train),
         train_set=lgb.Dataset(X_train, label=y_train, categorical_feature=CATEGORICAL_COLS),
         valid_sets=[
             lgb.Dataset(X_train, label=y_train, categorical_feature=CATEGORICAL_COLS),
@@ -71,11 +79,25 @@ def train_model(df_features: pd.DataFrame, train_end_date, mature_cutoff_date, l
         num_boost_round=1000,
         callbacks=[lgb.early_stopping(50), lgb.log_evaluation(50)],
     )
-    logger.info(f"Training done. Best iteration: {model.best_iteration}")
+    best_it = eval_model.best_iteration or 1000
+    logger.info(f"Best iteration: {best_it}")
+
+    # final_model: optionally refit on ALL mature data (train+val) for best_it rounds.
+    if refit_all_mature and bool(val_mask.any()):
+        X_mat, y_mat = X[train_mask | val_mask], y[train_mask | val_mask]
+        logger.info(f"Refit on all mature data: {X_mat.shape} for {best_it} rounds")
+        final_model = lgb.train(
+            params=_lgb_params(y_mat),
+            train_set=lgb.Dataset(X_mat, label=y_mat, categorical_feature=CATEGORICAL_COLS),
+            num_boost_round=best_it,
+            callbacks=[lgb.log_evaluation(50)],
+        )
+    else:
+        final_model = eval_model
 
     df_features = df_features.copy()
-    df_features["propensity_score"] = model.predict(X)
-    return model, X_train, X_val, y_train, y_val, df_features
+    df_features["propensity_score"] = final_model.predict(X)   # score full frame (incl. immature) for delivery
+    return final_model, eval_model, X_val, y_val, df_features
 
 
 def model_stats(model, X_val, y_val, threshold: float) -> dict:

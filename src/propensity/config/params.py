@@ -24,6 +24,10 @@ SNAPSHOT_FREQUENCY = "7D"           # snapshot cadence
 # Evaluation split: validation uses snapshots in (train_end, run_date - LABEL_WINDOW] so their
 # labels are FULLY MATURE. train_end defaults to run_date - LABEL_WINDOW - VALIDATION_WINDOW.
 VALIDATION_WINDOW  = 30             # width (days) of the mature validation window
+# After early-stopping on the held-out val, refit the DEPLOYED model on ALL mature data
+# (train + val) at the chosen iteration count. Metrics stay honest (reported from the
+# train-only model on the held-out val). ~2x the fit time. Set False to skip the second fit.
+REFIT_ON_ALL_MATURE = True
 
 # Model version stamped onto Klaviyo profiles.
 # v2 = star-schema source; funnel features are flag-based (not raw counts) and

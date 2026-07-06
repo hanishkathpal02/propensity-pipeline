@@ -82,7 +82,13 @@ orders). With `run_date` as the as-of day and `LABEL_WINDOW = 30`:
 - snapshots **newer than `run_date − LABEL_WINDOW`** have incomplete labels — they are **scored**
   (the latest snapshot per email drives the Klaviyo push) but **excluded from train/validation**.
 
-Tune via `LABEL_WINDOW` / `VALIDATION_WINDOW` in `config/params.py`.
+With `REFIT_ON_ALL_MATURE = True` (default), the deployed model is then **refit on all mature data
+(train + val)** at the early-stopped iteration count — so it learns from the most recent mature
+month too. Reported metrics stay **honest** (computed from the train-only model on the held-out
+val, which it never trained on); only the *deployed/scoring* model is the refit. Costs ~2× the
+fit time; set the flag `False` to skip the second fit.
+
+Tune via `LABEL_WINDOW` / `VALIDATION_WINDOW` / `REFIT_ON_ALL_MATURE` in `config/params.py`.
 
 ## Run locally
 

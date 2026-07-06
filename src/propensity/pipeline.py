@@ -68,9 +68,11 @@ def build_features(country: str, run_date: str):
 def train_score(country: str, run_date: str):
     _, _, train_end, mature_cutoff = _resolve_dates(run_date)
     df = artifacts.load_df(country, run_date, _FEATURES)
-    model, _, X_val, _, y_val, scored = train_model(df, train_end, mature_cutoff, params.LABEL_WINDOW)
-    model_stats(model, X_val, y_val, params.STATS_THRESHOLD)
-    artifacts.save_model(model, country, run_date)
+    final_model, eval_model, X_val, y_val, scored = train_model(
+        df, train_end, mature_cutoff, params.LABEL_WINDOW, params.REFIT_ON_ALL_MATURE)
+    # metrics from eval_model (train-only) on the held-out mature val -> honest even when we refit
+    model_stats(eval_model, X_val, y_val, params.STATS_THRESHOLD)
+    artifacts.save_model(final_model, country, run_date)   # deploy the refit (or train-only) model
     artifacts.save_df(scored, country, run_date, _SCORED)
 
 
