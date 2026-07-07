@@ -5,7 +5,6 @@ Ported from propensity_model2/modules/klaviyo_profile_sync.build_top3_profiles.
 Bands come from config.params.SCORE_BANDS; model version from config.params.MODEL_VERSION.
 """
 import hashlib
-from datetime import date
 
 import pandas as pd
 
@@ -25,8 +24,12 @@ def _band(score: float) -> str:
     return "low"
 
 
-def build_top3_profiles(df_features: pd.DataFrame, category_lookup: pd.DataFrame) -> pd.DataFrame:
-    """One row per email: top-3 categories by most-recent score, wide format + metadata."""
+def build_top3_profiles(df_features: pd.DataFrame, category_lookup: pd.DataFrame, run_date: str) -> pd.DataFrame:
+    """One row per email: top-3 categories by most-recent score, wide format + metadata.
+
+    prop_scored_at = run_date (the data as-of / latest-completed day), NOT the calendar day
+    the job executed.
+    """
     df = df_features.copy()
     df["email"] = df["email"].str.lower().str.strip()
     total = df["email"].nunique()
@@ -69,7 +72,7 @@ def build_top3_profiles(df_features: pd.DataFrame, category_lookup: pd.DataFrame
                 wide[col] = None
 
     wide["prop_model_version"] = MODEL_VERSION
-    wide["prop_scored_at"]     = str(date.today())
+    wide["prop_scored_at"]     = run_date          # data as-of date (latest completed day)
 
     col_order = (["email"]
                  + [f"prop_{rk}_{dim}" for rk in (1, 2, 3) for dim in _DIMS]

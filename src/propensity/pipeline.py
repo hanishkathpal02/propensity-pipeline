@@ -93,7 +93,7 @@ def verify(country: str, run_date: str):
 def build_profiles(country: str, run_date: str):
     scored = artifacts.load_df(country, run_date, _SCORED)
     lookup = read.get_category_lookup(country)
-    profiles = build_top3_profiles(scored, lookup)
+    profiles = build_top3_profiles(scored, lookup, run_date)
     artifacts.save_df(profiles, country, run_date, _PROFILES)
 
 
