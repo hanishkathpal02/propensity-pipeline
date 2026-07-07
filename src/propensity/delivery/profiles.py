@@ -5,6 +5,7 @@ Ported from propensity_model2/modules/klaviyo_profile_sync.build_top3_profiles.
 Bands come from config.params.SCORE_BANDS; model version from config.params.MODEL_VERSION.
 """
 import hashlib
+import re
 
 import pandas as pd
 
@@ -15,6 +16,9 @@ _HIGH = SCORE_BANDS["high"]
 _MED  = SCORE_BANDS["medium"]
 _DIMS = ["score", "band", "stone", "Jewelry", "Category"]
 
+# strict-enough email check (TLD must be >=2 letters) applied AFTER safe normalization
+_EMAIL_RE = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
+
 
 def _band(score: float) -> str:
     if score >= _HIGH:
@@ -24,6 +28,21 @@ def _band(score: float) -> str:
     return "low"
 
 
+def _normalize_email(e: str) -> str:
+    """SAFE corrections only (no guessing): trim/lowercase, collapse '..', drop a dot before
+    '@', and strip trailing junk after the (alphabetic) TLD, e.g. 'x@hotmail.com0' -> 'x@hotmail.com'."""
+    e = str(e or "").strip().lower()
+    e = re.sub(r"\.{2,}", ".", e)     # jerrie..mccain@ -> jerrie.mccain@
+    e = re.sub(r"\.+@", "@", e)        # janebradbury24.@ -> janebradbury24@
+    e = re.sub(r"[^a-z]+$", "", e)     # comcast.net3604 -> comcast.net  (TLDs end in letters)
+    return e
+
+
+def _is_valid_email(e: str) -> bool:
+    """Valid after normalization? Unrecoverable cases (e.g. truncated TLD 'yahoo.c') -> False."""
+    return bool(_EMAIL_RE.match(e or "")) and ".." not in e and ".@" not in e
+
+
 def build_top3_profiles(df_features: pd.DataFrame, category_lookup: pd.DataFrame, run_date: str) -> pd.DataFrame:
     """One row per email: top-3 categories by most-recent score, wide format + metadata.
 
@@ -31,7 +50,7 @@ def build_top3_profiles(df_features: pd.DataFrame, category_lookup: pd.DataFrame
     the job executed.
     """
     df = df_features.copy()
-    df["email"] = df["email"].str.lower().str.strip()
+    df["email"] = df["email"].map(_normalize_email)   # safe corrections (trim/lower/dots/trailing-junk)
     total = df["email"].nunique()
 
     # most-recent snapshot score per (email, category)
@@ -83,5 +102,9 @@ def build_top3_profiles(df_features: pd.DataFrame, category_lookup: pd.DataFrame
     wide["test_bucket"] = wide["email"].apply(
         lambda e: (int(hashlib.md5(e.encode()).hexdigest(), 16) % 100) + 1)
 
-    logger.info(f"Top-3 profiles built: {len(wide):,} of {total:,} scored emails")
+    # validity flag (email already safe-normalized above); only valid_email=True is synced
+    wide["valid_email"] = wide["email"].map(_is_valid_email)
+    n_valid = int(wide["valid_email"].sum())
+    logger.info(f"Top-3 profiles built: {len(wide):,} of {total:,} scored emails "
+                f"({n_valid:,} valid, {len(wide) - n_valid:,} invalid)")
     return wide

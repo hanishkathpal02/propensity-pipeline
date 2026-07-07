@@ -7,6 +7,7 @@ full-base sync is a handful of requests instead of one-per-profile. It is an UPS
 payloads, logs a sample, and sends nothing — so runs don't touch Klaviyo until reviewed.
 """
 import json
+import re
 import time
 from collections import Counter
 
@@ -18,6 +19,9 @@ from propensity.util import logger
 
 KLAVIYO_BULK_IMPORT_URL = "https://a.klaviyo.com/api/profile-bulk-import-jobs/"
 KLAVIYO_API_VERSION = "2024-02-15"
+# Klaviyo 400s a whole bulk job if ANY email is invalid, pointing at the offending index:
+#   /data/attributes/profiles/data/<idx>/attributes/email
+_INVALID_EMAIL_PTR = re.compile(r"/data/attributes/profiles/data/(\d+)/attributes/email")
 BULK_MAX = 10_000                 # Klaviyo hard limit: profiles per bulk-import job
 _DIMS = ["score", "band", "stone", "Jewelry", "Category"]
 
@@ -54,6 +58,43 @@ def _bulk_body(rows) -> dict:
                      "attributes": {"profiles": {"data": [_profile_obj(r) for r in rows]}}}}
 
 
+def _submit_bulk(objs, headers, label, sleep, max_retries: int = 25):
+    """POST one bulk-import job. On a 400 for invalid email(s), drop the flagged profile(s)
+    and retry — so a few bad addresses can't sink the whole batch. Returns (job_id|None, n_dropped)."""
+    objs = list(objs)
+    dropped = 0
+    for _ in range(max_retries):
+        if not objs:
+            return None, dropped
+        body = {"data": {"type": "profile-bulk-import-job", "attributes": {"profiles": {"data": objs}}}}
+        try:
+            r = requests.post(KLAVIYO_BULK_IMPORT_URL, headers=headers, json=body, timeout=60)
+        except Exception as e:
+            logger.error(f"{label} exception: {e}")
+            return None, dropped
+        if r.status_code in (200, 201, 202):
+            return r.json().get("data", {}).get("id"), dropped
+        if r.status_code == 400:
+            try:
+                errs = r.json().get("errors", [])
+            except Exception:
+                errs = []
+            idxs = sorted({int(m.group(1)) for e in errs
+                           for m in [_INVALID_EMAIL_PTR.search((e.get("source") or {}).get("pointer", "") or "")] if m},
+                          reverse=True)
+            if idxs:
+                for i in idxs:
+                    if 0 <= i < len(objs):
+                        objs.pop(i)
+                        dropped += 1
+                time.sleep(sleep)
+                continue
+        logger.warning(f"{label} failed [{r.status_code}]: {r.text[:200]}")
+        return None, dropped
+    logger.warning(f"{label} gave up after {max_retries} retries (too many invalid emails)")
+    return None, dropped
+
+
 def _poll_jobs(job_ids, headers, max_wait_s: int = 600, interval_s: int = 10) -> dict:
     """Poll bulk-import jobs until complete/cancelled (or timeout). Returns status counts."""
     pending, status, waited = set(job_ids), {}, 0
@@ -84,6 +125,13 @@ def sync_profiles_to_klaviyo(df_profiles, api_key: str, dry_run: bool = True,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    # send only rows flagged valid_email=True (invalid ones are excluded up front, in profiles)
+    if "valid_email" in df_profiles.columns:
+        n0 = len(df_profiles)
+        df_profiles = df_profiles[df_profiles["valid_email"] == True]  # noqa: E712
+        skipped = n0 - len(df_profiles)
+        if skipped:
+            logger.info(f"Excluded {skipped:,} invalid-email profiles (valid_email=False) before send")
     records = df_profiles.to_dict(orient="records")
     total = len(records)
     batch_size = min(batch_size, BULK_MAX)
@@ -97,23 +145,21 @@ def sync_profiles_to_klaviyo(df_profiles, api_key: str, dry_run: bool = True,
         logger.info(f"{mode} Done — {len(chunks)} bulk job(s) prepared, nothing sent.")
         return {"total": total, "jobs": len(chunks), "skipped_dry_run": total}
 
-    job_ids, failed = [], 0
+    job_ids, failed, dropped_total = [], 0, 0
     for ci, chunk in enumerate(chunks, 1):
-        try:
-            resp = requests.post(KLAVIYO_BULK_IMPORT_URL, headers=headers, json=_bulk_body(chunk), timeout=60)
-            if resp.status_code in (200, 201, 202):
-                jid = resp.json().get("data", {}).get("id")
-                job_ids.append(jid)
-                logger.info(f"job {ci}/{len(chunks)} accepted: {jid} ({len(chunk):,} profiles)")
-            else:
-                failed += 1
-                logger.warning(f"job {ci}/{len(chunks)} failed [{resp.status_code}]: {resp.text[:250]}")
-        except Exception as e:
+        objs = [_profile_obj(r) for r in chunk]
+        jid, dropped = _submit_bulk(objs, headers, f"job {ci}/{len(chunks)}", rate_limit_sleep)
+        dropped_total += dropped
+        if jid:
+            job_ids.append(jid)
+            extra = f", {dropped} invalid dropped" if dropped else ""
+            logger.info(f"job {ci}/{len(chunks)} accepted: {jid} ({len(chunk) - dropped:,} profiles{extra})")
+        else:
             failed += 1
-            logger.error(f"job {ci}/{len(chunks)} exception: {e}")
         time.sleep(rate_limit_sleep)
 
-    result = {"total": total, "jobs": len(job_ids), "failed_jobs": failed, "job_ids": job_ids}
+    result = {"total": total, "jobs": len(job_ids), "failed_jobs": failed,
+              "invalid_dropped": dropped_total, "job_ids": job_ids}
     if poll and job_ids:
         result["job_status"] = _poll_jobs(job_ids, headers)
     logger.info(f"{mode} Sync complete — {result}")
