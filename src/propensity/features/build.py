@@ -19,7 +19,7 @@ from propensity.util import logger
 # Single source of truth for the model layer to import.
 FEATURE_COLS = [
     "propensity_category", "devices", "channels", "subscriber_channel",
-    "days_since_last_active", "days_since_subscribed", "is_subscribed",
+    "days_since_last_active", "days_since_last_purchase", "days_since_subscribed", "is_subscribed",
     "email_opens", "email_clicks", "visits", "product_views", "cart_adds",
     "checkouts", "orders",
 ]
@@ -48,12 +48,25 @@ def _build_snapshot(snapshot_date, behavior, subscriber, klaviyo, lookback_days)
               orders=("orders", "sum"))
     )
 
-    # recency
+    # recency of ANY activity (within the lookback window)
     last = (b.groupby(["email", "propensity_category"], as_index=False)
               .agg(last_date=("date", "max")))
     last["days_since_last_active"] = (snapshot_date - last["last_date"]).dt.days
     feat = feat.merge(last[["email", "propensity_category", "days_since_last_active"]],
                       on=["email", "propensity_category"], how="left")
+
+    # recency of PURCHASE (UNBOUNDED — last order in the category over ALL history before the
+    # snapshot, not just the lookback). Separating "recently browsed" from "recently bought" lets
+    # the model down-weight recent purchasers (who rarely re-buy the same category within 30 days).
+    pw = behavior[(behavior["date"] < snapshot_date) & (behavior["orders"] > 0)]
+    if len(pw):
+        lastp = (pw.groupby(["email", "propensity_category"], as_index=False)
+                   .agg(last_purchase_date=("date", "max")))
+        lastp["days_since_last_purchase"] = (snapshot_date - lastp["last_purchase_date"]).dt.days
+        feat = feat.merge(lastp[["email", "propensity_category", "days_since_last_purchase"]],
+                          on=["email", "propensity_category"], how="left")
+    else:
+        feat["days_since_last_purchase"] = np.nan
 
     # subscription
     sub = (s.groupby("email", as_index=False)
@@ -99,15 +112,16 @@ def _clean(df, label_window):
     col = label_col(label_window)
     out = df[[
         "snapshot_date", "email", "propensity_category", "devices", "channels",
-        "subscriber_channel", "days_since_last_active", "days_since_subscribed",
-        "visits", "is_subscribed", "email_opens", "email_clicks",
+        "subscriber_channel", "days_since_last_active", "days_since_last_purchase",
+        "days_since_subscribed", "visits", "is_subscribed", "email_opens", "email_clicks",
         "product_views", "cart_adds", "checkouts", "orders", col,
     ]].copy()
 
-    out["is_subscribed"]          = np.where(out["subscriber_channel"].notna(), 1, 0)
-    out["subscriber_channel"]     = out["subscriber_channel"].fillna("non_subscriber")
-    out["days_since_subscribed"]  = out["days_since_subscribed"].fillna(999)
-    out["days_since_last_active"] = out["days_since_last_active"].fillna(999)
+    out["is_subscribed"]            = np.where(out["subscriber_channel"].notna(), 1, 0)
+    out["subscriber_channel"]       = out["subscriber_channel"].fillna("non_subscriber")
+    out["days_since_subscribed"]    = out["days_since_subscribed"].fillna(999)
+    out["days_since_last_active"]   = out["days_since_last_active"].fillna(999)
+    out["days_since_last_purchase"] = out["days_since_last_purchase"].fillna(9999)  # 9999 = never purchased
     out["email_opens"]            = out["email_opens"].fillna(0)
     out["email_clicks"]           = out["email_clicks"].fillna(0)
     out["devices"]                = out["devices"].fillna("unknown")
@@ -128,7 +142,12 @@ def build_training_frame(raw: RawData, *, start_date, end_date,
     subscriber["subscription_date"] = pd.to_datetime(subscriber["subscription_date"])
     klaviyo["date"]               = pd.to_datetime(klaviyo["date"])
 
-    snapshot_dates = pd.date_range(start=start_date, end=end_date, freq=snapshot_freq)
+    # Weekly grid ANCHORED TO end_date (run_date) so the freshest snapshot is EXACTLY run_date.
+    # (A start-anchored grid lands the last snapshot on a fixed weekly point up to ~1 period
+    # stale, missing the most recent — highest-intent — activity.)
+    _step_days = int("".join(ch for ch in snapshot_freq if ch.isdigit()) or "7")
+    _n_snaps = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days // _step_days + 1
+    snapshot_dates = pd.date_range(end=pd.Timestamp(end_date), periods=_n_snaps, freq=snapshot_freq)
     logger.info(f"Building {len(snapshot_dates)} snapshots "
                 f"(lookback={lookback_days}d, label={label_window}d, freq={snapshot_freq})")
 
