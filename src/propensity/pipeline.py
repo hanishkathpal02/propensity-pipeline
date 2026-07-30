@@ -16,6 +16,7 @@ from propensity.config import params
 from propensity.config.settings import klaviyo_api_key
 from propensity.delivery.klaviyo import sync_profiles_to_klaviyo
 from propensity.delivery.profiles import build_top3_profiles
+from propensity.delivery.sync_log import log_sync_to_redshift
 from propensity.features.build import build_training_frame
 from propensity.io import artifacts, freshness, read
 from propensity.model.analysis import save_analysis
@@ -106,3 +107,11 @@ def sync_klaviyo(country: str, run_date: str, dry_run=True):
         raise ValueError(f"No Klaviyo key for {country}: set KLAVIYO_API_KEY_{country.upper()} (ENV=prod)")
     result = sync_profiles_to_klaviyo(profiles, api_key, dry_run=dry)
     logger.info(f"Klaviyo sync (dry_run={dry}) result: {result}")
+
+
+def log_klaviyo_sync(country: str, run_date: str, dry_run=True):
+    """Append this run's profiles + send metadata to propensity.klaviyo_sync_log (audit/debug)."""
+    dry = str(dry_run).strip().lower() not in ("false", "0", "no", "off")
+    profiles = artifacts.load_df(country, run_date, _PROFILES)
+    result = log_sync_to_redshift(profiles, country, run_date, dry)
+    logger.info(f"Klaviyo sync log (dry_run={dry}) result: {result}")

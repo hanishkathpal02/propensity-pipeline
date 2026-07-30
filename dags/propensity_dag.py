@@ -4,7 +4,7 @@ Propensity pipeline DAG.
     load_dim ─┐
     load_fact_category ─┼─► analyze ─► freshness_gate ─► build_features ─► train_score ─┬─► analysis
     load_fact_subscription ─┤                                                           ├─► verify
-    load_fact_klaviyo ─┘                                                                └─► build_profiles ─► sync_klaviyo
+    load_fact_klaviyo ─┘                                                                └─► build_profiles ─► sync_klaviyo ─► log_sync
 
 Warehouse refreshes run inside Redshift (SQL CALLs). Everything from build_features
 onward is a PythonOperator calling propensity.pipeline; steps pass data via the
@@ -116,9 +116,11 @@ with DAG(
     build_profiles = _py("build_profiles",  pipeline.build_profiles)
     sync_klaviyo   = _py("sync_klaviyo",     pipeline.sync_klaviyo,
                          dry_run="{{ var.value.get('propensity_sync_dry_run', 'true') }}")
+    log_sync       = _py("log_sync",         pipeline.log_klaviyo_sync,
+                         dry_run="{{ var.value.get('propensity_sync_dry_run', 'true') }}")
 
     refreshes = [load_dim, load_fact_category, load_fact_subscription, load_fact_klaviyo]
     resolve_dates >> refreshes
     refreshes >> analyze >> freshness_gate >> build_features >> train_score
     train_score >> [analysis, verify, build_profiles]
-    build_profiles >> sync_klaviyo
+    build_profiles >> sync_klaviyo >> log_sync
