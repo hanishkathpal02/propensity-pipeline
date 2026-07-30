@@ -3,6 +3,7 @@
 pandas
 numpy
 lightgbm
+catboost
 scikit-learn
 psycopg2-binary
 boto3

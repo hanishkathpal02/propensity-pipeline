@@ -27,12 +27,21 @@ VALIDATION_WINDOW  = 30             # width (days) of the mature validation wind
 # After early-stopping on the held-out val, refit the DEPLOYED model on ALL mature data
 # (train + val) at the chosen iteration count. Metrics stay honest (reported from the
 # train-only model on the held-out val). ~2x the fit time. Set False to skip the second fit.
-REFIT_ON_ALL_MATURE = True
+REFIT_ON_ALL_MATURE = False   # deploy the train-only (eval) model — its honest held-out AUC is
+                              # what we report, and it avoids a long uninterrupted second fit that
+                              # Airflow's zombie-detection kills mid-run. Re-enable only with a
+                              # higher scheduler heartbeat timeout.
+
+# Training engine: "catboost" (default) or "lightgbm". Both are supported by
+# model/train.py; switch here without touching any other code. CatBoost handles the
+# categorical features (channel/subscriber_channel/device/category) far better and
+# relies less on raw recency -> higher AUC and fewer recent purchasers in the top bands.
+MODEL_TYPE = "catboost"
 
 # Model version stamped onto Klaviyo profiles.
-# v2 = star-schema source; funnel features are flag-based (not raw counts) and
-# channel/device come from the normalized dims -> NOT comparable to v1 scores.
-MODEL_VERSION = "v2"
+# v3 = CatBoost engine + `days_since_last_purchase` feature -> NOT comparable to v2 scores.
+# v2 = LightGBM, star-schema source. v1 = raw-clickstream baseline.
+MODEL_VERSION = "v3"
 
 # Evaluation: classification threshold for the confusion-matrix / precision / recall stats.
 # Reporting knob only — does not affect scores sent to Klaviyo.
