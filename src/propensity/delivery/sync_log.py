@@ -1,15 +1,19 @@
 """
-Persist the Klaviyo sync payload to Redshift (propensity.klaviyo_sync_log) for audit/debug.
+Persist the Klaviyo sync payload to Redshift (propensity.klaviyo_sync_log_v4) for audit/debug.
 
-Runs as the last DAG step (after sync_klaviyo). Appends one row per profile built this run,
-with the send metadata (country, run_date, synced_at, dry_run) alongside the exact payload
-(top-3 categories, scores/bands, model version, scored-at date, test bucket, valid flag).
-Append-only, so every run's send is preserved and comparable over time.
+Runs as the last DAG step (after sync_klaviyo). Appends one row per profile built this run:
+identity/metadata as explicit columns, and EVERY prop_* attribute field serialized into a single
+SUPER `payload` column. That keeps the table future-proof — adding a new dimension changes only the
+registry (config/dimensions.py); the log table never needs a schema migration.
 
-Write path = CSV -> S3 -> COPY (the same mechanism verify.py uses); no new infra.
+Write path = CSV -> S3 -> COPY (the same mechanism verify.py uses). Redshift's COPY parses the
+JSON string in the CSV directly into the SUPER column, so `payload.prop_1_metal` is queryable.
 """
+import json
 from datetime import datetime, timezone
 
+import numpy as np
+import pandas as pd
 import psycopg2
 
 from propensity.config.settings import REDSHIFT_CONFIG
@@ -17,12 +21,15 @@ from propensity.delivery.profiles import payload_columns
 from propensity.io import s3
 from propensity.util import logger
 
-# v4 payload is wider (per-dimension scores/bands) than v3, so it logs to its own table;
-# the v3 propensity.klaviyo_sync_log is left intact for historical continuity.
 TABLE = "propensity.klaviyo_sync_log_v4"
 
-# metadata first, then the full registry-derived payload — MUST match the column order in the DDL
-LOG_COLS = ["country", "run_date", "synced_at", "dry_run"] + payload_columns()
+# Explicit table columns = the identity/metadata you filter & join on. Everything else — every
+# prop_* attribute field (legacy + per-dimension) — goes into the SUPER `payload` column.
+META_COLS = ["country", "run_date", "synced_at", "dry_run", "email",
+             "prop_model_version", "prop_scored_at", "test_bucket", "valid_email"]
+_META_SET = set(META_COLS)
+PAYLOAD_FIELDS = [c for c in payload_columns() if c not in _META_SET]   # legacy + per-dim prop_*
+LOG_COLS = META_COLS + ["payload"]                                      # CSV order == DDL order
 
 _COPY = """
 COPY {table} ({cols})
@@ -33,22 +40,48 @@ TRUNCATECOLUMNS MAXERROR 100
 """
 
 
+def _row_payload(row) -> str:
+    """Serialize one profile's prop_* fields to a compact JSON string (absent fields omitted).
+
+    Keys are LOWERCASED: Redshift folds unquoted SUPER paths to lowercase, so a mixed-case key
+    like `prop_1_Category` would be unreachable via `payload.prop_1_category` otherwise. Lowercasing
+    keeps every field navigable without quoting or session flags (values are untouched).
+    """
+    d = {}
+    for k, v in row.items():
+        if pd.isna(v):
+            continue                                    # skip absent attributes -> smaller JSON
+        key = k.lower()
+        if isinstance(v, (np.floating, float)):
+            d[key] = round(float(v), 4)
+        elif isinstance(v, (np.integer,)):
+            d[key] = int(v)
+        else:
+            d[key] = str(v)
+    return json.dumps(d, separators=(",", ":"))
+
+
 def log_sync_to_redshift(df_profiles, country: str, run_date: str, dry_run: bool) -> dict:
-    """Append this run's profiles + send metadata to propensity.klaviyo_sync_log."""
+    """Append this run's profiles + send metadata to propensity.klaviyo_sync_log_v4."""
     df = df_profiles.copy()
     df["country"]   = country
     df["run_date"]  = run_date
     df["synced_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     df["dry_run"]   = int(bool(dry_run))                       # 1/0 -> BOOLEAN on COPY
     if "valid_email" in df.columns:
-        df["valid_email"] = df["valid_email"].fillna(False).astype(bool).astype(int)  # 1/0 -> BOOLEAN
+        df["valid_email"] = df["valid_email"].fillna(False).astype(bool).astype(int)
 
-    for c in LOG_COLS:                                         # tolerate a missing column (shouldn't happen)
+    for c in PAYLOAD_FIELDS:                                   # tolerate a missing attribute column
+        if c not in df.columns:
+            df[c] = None
+    df["payload"] = df[PAYLOAD_FIELDS].apply(_row_payload, axis=1)
+
+    for c in LOG_COLS:
         if c not in df.columns:
             df[c] = None
     df = df[LOG_COLS]
 
-    key = s3.upload_df(df, f"klaviyo_sync_log_{country}_{run_date}")
+    key = s3.upload_df(df, f"klaviyo_sync_log_v4_{country}_{run_date}")
     try:
         conn = psycopg2.connect(**REDSHIFT_CONFIG)
         try:
