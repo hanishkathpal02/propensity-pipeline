@@ -41,7 +41,7 @@ MODEL_TYPE = "catboost"
 # Model version stamped onto Klaviyo profiles.
 # v3 = CatBoost engine + `days_since_last_purchase` feature -> NOT comparable to v2 scores.
 # v2 = LightGBM, star-schema source. v1 = raw-clickstream baseline.
-MODEL_VERSION = "v3"
+MODEL_VERSION = "v4"   # per-dimension scoring (WS1/WS2); logs to klaviyo_sync_log_v4
 
 # Evaluation: classification threshold for the confusion-matrix / precision / recall stats.
 # Reporting knob only — does not affect scores sent to Klaviyo.

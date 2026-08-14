@@ -15,10 +15,10 @@ class StaleDataError(RuntimeError):
 
 # (table, date column to check, whether it's country-scoped)
 _CHECKS = [
-    ("profiles.dim_visitor_email_map",      "etl_loaded_at::date",  False),  # full refresh daily
-    ("propensity.fact_propensity_category", "date",                 True),
-    ("propensity.fact_subscription",        "subscription_date",    True),
-    ("propensity.fact_klaviyo_engagements", "date",                 True),
+    ("profiles.dim_visitor_email_map",        "etl_loaded_at::date",  False),  # full refresh daily
+    ("propensity.fact_propensity_attributes", "date",                 True),   # v4 wide fact
+    ("propensity.fact_subscription",          "subscription_date",    True),
+    ("propensity.fact_klaviyo_engagements",   "date",                 True),
 ]
 
 

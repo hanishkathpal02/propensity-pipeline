@@ -112,3 +112,72 @@ def get_data(country: str, start_date: str, end_date: str) -> RawData:
 def get_category_lookup(country: str):
     """category -> (stone_type, jewelry_type) from dim_product."""
     return fetch_df(CATEGORY_LOOKUP_QUERY.format(country=country))
+
+
+# ===========================================================================
+# v4 generalized per-dimension read.
+#
+# Same shape as BEHAVIOR_QUERY, but reads the wider fact_propensity_attributes
+# and aliases the dimension's grain column to `propensity_category` — so the
+# ENTIRE downstream (features/build.py, model/train.py) is reused UNCHANGED; it
+# never needs to know which dimension it is scoring. Klaviyo/subscriber frames
+# are dimension-independent, so the pipeline reads them ONCE and passes them in
+# (avoids re-scanning the 35M-row Klaviyo fact 7x).
+# ===========================================================================
+DIM_BEHAVIOR_QUERY = """
+SELECT
+    f.date,
+    m.email,
+    f.{column}              AS propensity_category,
+    f.device                AS devices,
+    f.channel               AS channels,
+    SUM(f.sessions)         AS sessions,
+    SUM(f.product_views)    AS product_views,
+    SUM(f.cart_additions)   AS cart_adds,
+    SUM(f.checkouts)        AS checkouts,
+    SUM(f.orders)           AS orders
+FROM propensity.fact_propensity_attributes f
+JOIN profiles.dim_visitor_email_map m
+  ON f.visitor_id = m.visitor_id
+ AND f.country    = m.country
+WHERE f.country = '{country}'
+  AND f.date BETWEEN '{start_date}' AND '{end_date}'
+  AND f.{column} IS NOT NULL
+  AND f.{column} NOT IN ({exclude})
+GROUP BY f.date, m.email, f.{column}, f.device, f.channel
+"""
+
+
+def _exclude_sql(values) -> str:
+    """Render a dimension's placeholder-exclude tuple as a SQL IN-list literal."""
+    return ", ".join("'%s'" % v.replace("'", "''") for v in values)
+
+
+def get_dimension_behavior(country: str, start_date: str, end_date: str, dim) -> "pd.DataFrame":
+    """Behavior frame at (email x dim.column) grain — the only per-dimension read."""
+    sql = DIM_BEHAVIOR_QUERY.format(
+        column=dim.column, country=country,
+        start_date=start_date, end_date=end_date, exclude=_exclude_sql(dim.exclude),
+    )
+    behavior = fetch_df(sql)
+    logger.info(f"  behavior[{dim.key}]: {behavior.shape}  "
+                f"distinct {dim.column}: {behavior['propensity_category'].nunique()}")
+    return behavior
+
+
+def get_dimension_data(country: str, start_date: str, end_date: str, dim,
+                       klaviyo=None, subscriber=None) -> RawData:
+    """RawData for one dimension. Reuses klaviyo/subscriber if passed (read once per run)."""
+    behavior = get_dimension_behavior(country, start_date, end_date, dim)
+    if klaviyo is None:
+        klaviyo = fetch_df(KLAVIYO_QUERY.format(country=country))
+    if subscriber is None:
+        subscriber = fetch_df(SUBSCRIBER_QUERY.format(country=country))
+    return RawData(behavior=behavior, klaviyo=klaviyo, subscriber=subscriber)
+
+
+def get_shared_frames(country: str):
+    """(klaviyo, subscriber) — dimension-independent; read once, reuse across all dimensions."""
+    klaviyo = fetch_df(KLAVIYO_QUERY.format(country=country))
+    subscriber = fetch_df(SUBSCRIBER_QUERY.format(country=country))
+    return klaviyo, subscriber

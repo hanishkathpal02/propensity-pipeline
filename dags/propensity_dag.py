@@ -1,12 +1,16 @@
 """
 Propensity pipeline DAG.
 
-    load_dim ─┐
-    load_fact_category ─┼─► analyze ─► freshness_gate ─► build_features ─► train_score ─┬─► analysis
-    load_fact_subscription ─┤                                                           ├─► verify
-    load_fact_klaviyo ─┘                                                                └─► build_profiles ─► sync_klaviyo ─► log_sync
+    load_dim ─┐                                             build_features_{dim} ─► train_score_{dim}  (×7, pool=1)
+    load_fact_attributes ─┼─► analyze ─► freshness_gate ─► build_shared ─┤ … one pair per dimension …  ├─► build_profiles ─► sync_klaviyo ─► log_sync
+    load_fact_subscription ─┤                                            └───────── strict fan-in ─────┘
+    load_fact_klaviyo ─┘
 
-Warehouse refreshes run inside Redshift (SQL CALLs). Everything from build_features
+v4: every dimension (category, stone, jewelry, metal, stone_origin, product_gender, price_range)
+is scored by the SAME generalized pipeline; the propensity_models pool (slots=1) serializes the
+heavy per-dimension tasks. build_profiles is strict all_success — one dimension failure => no send.
+
+Warehouse refreshes run inside Redshift (SQL CALLs). Everything from build_shared
 onward is a PythonOperator calling propensity.pipeline; steps pass data via the
 artifact store (io.artifacts), so each is independently retryable.
 
@@ -22,10 +26,12 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 
 from propensity import pipeline
+from propensity.config.dimensions import DIMENSION_KEYS
 from propensity.config.params import GEO_UTC_OFFSET_HOURS, START_DATE
 
 REDSHIFT_CONN = "redshift_default"
 COUNTRY       = "US"
+MODEL_POOL    = "propensity_models"   # slots=1 -> only one dimension's heavy task runs at a time
 
 
 def resolve_run_dates(country, **_):
@@ -57,10 +63,11 @@ RUN_DATE = "{{ ti.xcom_pull(task_ids='resolve_dates')['run_date'] }}"
 TO_DS    = "{{ ti.xcom_pull(task_ids='resolve_dates')['to_date'] }}"
 
 
-def _py(task_id, fn, **extra_kwargs):
+def _py(task_id, fn, pool=None, **extra_kwargs):
     return PythonOperator(
         task_id=task_id,
         python_callable=fn,
+        pool=pool,
         op_kwargs={"country": COUNTRY, "run_date": RUN_DATE, **extra_kwargs},
     )
 
@@ -85,9 +92,9 @@ with DAG(
         task_id="load_dim_visitor_email_map", conn_id=REDSHIFT_CONN,
         sql="CALL profiles.sp_load_dim_visitor_email_map();",
     )
-    load_fact_category = SQLExecuteQueryOperator(
-        task_id="load_fact_propensity_category", conn_id=REDSHIFT_CONN,
-        sql=f"CALL propensity.sp_load_fact_propensity_category('{COUNTRY}', DATE '{TO_DS}', DATE '{START_DATE}');",
+    load_fact_attributes = SQLExecuteQueryOperator(
+        task_id="load_fact_propensity_attributes", conn_id=REDSHIFT_CONN,
+        sql=f"CALL propensity.sp_load_fact_propensity_attributes('{COUNTRY}', DATE '{TO_DS}', DATE '{START_DATE}');",
     )
     load_fact_subscription = SQLExecuteQueryOperator(
         task_id="load_fact_subscription", conn_id=REDSHIFT_CONN,
@@ -101,26 +108,37 @@ with DAG(
         task_id="analyze_tables", conn_id=REDSHIFT_CONN,
         sql=[
             "ANALYZE profiles.dim_visitor_email_map;",
-            "ANALYZE propensity.fact_propensity_category;",
+            "ANALYZE propensity.fact_propensity_attributes;",
             "ANALYZE propensity.fact_subscription;",
             "ANALYZE propensity.fact_klaviyo_engagements;",
         ],
     )
 
     # ---- Model + delivery (Python; pass data via artifact store) ----
-    freshness_gate = _py("freshness_gate",  pipeline.freshness_gate)
-    build_features = _py("build_features",  pipeline.build_features)
-    train_score    = _py("train_score",     pipeline.train_score)
-    analysis       = _py("analysis",        pipeline.analysis)
-    verify         = _py("verify",          pipeline.verify)
-    build_profiles = _py("build_profiles",  pipeline.build_profiles)
-    sync_klaviyo   = _py("sync_klaviyo",     pipeline.sync_klaviyo,
+    # v4: one (build_features -> train_score) pair PER DIMENSION, all reusing the same
+    # generalized machinery. The propensity_models pool (slots=1) serializes them so only
+    # one dimension's CatBoost fit is in memory at a time.
+    freshness_gate = _py("freshness_gate",      pipeline.freshness_gate)
+    build_shared   = _py("build_shared_frames", pipeline.build_shared_frames)
+
+    train_tasks = []
+    for _key in DIMENSION_KEYS:
+        bf = _py(f"build_features_{_key}", pipeline.build_features_dim, pool=MODEL_POOL, dimension=_key)
+        ts = _py(f"train_score_{_key}",    pipeline.train_score_dim,    pool=MODEL_POOL, dimension=_key)
+        build_shared >> bf >> ts
+        train_tasks.append(ts)
+
+    # Strict fan-in: build_profiles (default trigger_rule=all_success) runs ONLY if every
+    # dimension trained -> a single dimension failure blocks the whole send. Resume = clear the
+    # failed dimension (+ build_profiles/sync/log) in the SAME run; already-successful
+    # dimensions stay `success` and are NOT re-trained.
+    build_profiles = _py("build_profiles", pipeline.build_profiles_all_dims)
+    sync_klaviyo   = _py("sync_klaviyo",    pipeline.sync_klaviyo,
                          dry_run="{{ var.value.get('propensity_sync_dry_run', 'true') }}")
-    log_sync       = _py("log_sync",         pipeline.log_klaviyo_sync,
+    log_sync       = _py("log_sync",        pipeline.log_klaviyo_sync,
                          dry_run="{{ var.value.get('propensity_sync_dry_run', 'true') }}")
 
-    refreshes = [load_dim, load_fact_category, load_fact_subscription, load_fact_klaviyo]
+    refreshes = [load_dim, load_fact_attributes, load_fact_subscription, load_fact_klaviyo]
     resolve_dates >> refreshes
-    refreshes >> analyze >> freshness_gate >> build_features >> train_score
-    train_score >> [analysis, verify, build_profiles]
-    build_profiles >> sync_klaviyo >> log_sync
+    refreshes >> analyze >> freshness_gate >> build_shared
+    train_tasks >> build_profiles >> sync_klaviyo >> log_sync

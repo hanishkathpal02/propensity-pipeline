@@ -13,17 +13,16 @@ from datetime import datetime, timezone
 import psycopg2
 
 from propensity.config.settings import REDSHIFT_CONFIG
+from propensity.delivery.profiles import payload_columns
 from propensity.io import s3
 from propensity.util import logger
 
-TABLE = "propensity.klaviyo_sync_log"
+# v4 payload is wider (per-dimension scores/bands) than v3, so it logs to its own table;
+# the v3 propensity.klaviyo_sync_log is left intact for historical continuity.
+TABLE = "propensity.klaviyo_sync_log_v4"
 
-_DIMS = ["score", "band", "stone", "Jewelry", "Category"]
-_PROFILE_COLS = (["email"]
-                 + [f"prop_{r}_{d}" for r in (1, 2, 3) for d in _DIMS]
-                 + ["prop_model_version", "prop_scored_at", "test_bucket", "valid_email"])
-# metadata first, then the profile payload — MUST match the column order in the table DDL
-LOG_COLS = ["country", "run_date", "synced_at", "dry_run"] + _PROFILE_COLS
+# metadata first, then the full registry-derived payload — MUST match the column order in the DDL
+LOG_COLS = ["country", "run_date", "synced_at", "dry_run"] + payload_columns()
 
 _COPY = """
 COPY {table} ({cols})
