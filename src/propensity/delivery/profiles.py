@@ -11,6 +11,7 @@ import pandas as pd
 
 from propensity.config.dimensions import DIMENSIONS
 from propensity.config.params import MODEL_VERSION, SCORE_BANDS
+from propensity.delivery import grammar
 from propensity.util import logger
 
 _HIGH = SCORE_BANDS["high"]
@@ -22,6 +23,13 @@ MULTI_DIMS  = [d for d in DIMENSIONS if d.top_n > 1]    # category, stone, jewel
 SINGLE_DIMS = [d for d in DIMENSIONS if d.top_n == 1]   # stone_origin, product_gender, price_range
 _MAX_RANK   = max((d.top_n for d in DIMENSIONS), default=3)
 
+# WS3 grammar: singular/plural display forms for these display attributes, at these ranks.
+# (Field naming + rank scope to confirm with Email team; rank-1 is the default that drives
+# subject lines.) Suppression core = a profile must have rank-1 for all of these + price.
+GRAMMAR_DIMS  = ("category", "stone", "jewelry")
+GRAMMAR_RANKS = (1, 2, 3)                      # spec: all six grammar fields, ranks 1-3
+CORE_FIELDS   = [f"prop_1_{d.field}" for d in MULTI_DIMS] + ["prop_price_range"]
+
 
 def payload_columns():
     """Ordered list of every v4 profile column (registry-derived; the one source of truth).
@@ -30,13 +38,14 @@ def payload_columns():
     so all three stay in lockstep — add a dimension to the registry and all three update.
     """
     cols = ["email"]
-    for rk in range(1, _MAX_RANK + 1):                       # legacy = Category score/band (retained)
-        cols += [f"prop_{rk}_score", f"prop_{rk}_band"]
     for d in MULTI_DIMS:                                      # each value + its OWN score + band
         for rk in range(1, d.top_n + 1):
             cols += [f"prop_{rk}_{d.field}", f"prop_{rk}_{d.field}_score", f"prop_{rk}_{d.field}_band"]
     for d in SINGLE_DIMS:                                     # single-value dims: no rank suffix
         cols += [f"prop_{d.field}", f"prop_{d.field}_score", f"prop_{d.field}_band"]
+    for rk in GRAMMAR_RANKS:                                  # WS3 singular/plural display forms
+        for name in GRAMMAR_DIMS:
+            cols += [f"prop_{rk}_{name}_singular", f"prop_{rk}_{name}_plural"]
     cols += ["prop_model_version", "prop_scored_at", "test_bucket", "valid_email"]
     return cols
 
@@ -169,7 +178,53 @@ def _pivot_single(ranked: pd.DataFrame, field: str) -> pd.DataFrame:
     return out
 
 
-def build_v4_profiles(ranked_by_dim: dict, run_date: str) -> pd.DataFrame:
+def _suppress_incomplete(wide: pd.DataFrame) -> pd.DataFrame:
+    """Drop profiles missing any CORE attribute (a dim_product data gap) and log WHY, so the
+    data team gets an exact list of catalog gaps to fix. Missing gender/stone_origin is allowed."""
+    present = [c for c in CORE_FIELDS if c in wide.columns]
+    miss = wide[present].isna().any(axis=1) if present else pd.Series(False, index=wide.index)
+    n = int(miss.sum())
+    if n:
+        for c in present:
+            k = int(wide.loc[miss, c].isna().sum())
+            if k:
+                logger.info(f"  suppress-reason: {k:,} profiles missing {c}")
+    logger.info(f"suppressed {n:,} profiles missing a core attribute; {len(wide) - n:,} remain")
+    return wide[~miss].reset_index(drop=True)
+
+
+def _add_grammar_fields(wide: pd.DataFrame, category_lookup) -> None:
+    """WS3: add singular/plural display forms for category/stone/jewelry (in-place)."""
+    cmap = {}
+    if category_lookup is not None and not category_lookup.empty:
+        cmap = {r["product_category"]: (r["stone_type"], r["jewelry_type"])
+                for _, r in category_lookup.iterrows()}
+
+    def cat_forms(v):
+        if pd.isna(v):
+            return (None, None)
+        st, jw = cmap.get(v, (None, None))
+        return grammar.category_forms(st, jw) if st is not None else (v, v)  # fallback: raw
+    fns = {"category": cat_forms,
+           "stone":    lambda v: grammar.stone_forms(v) if pd.notna(v) else (None, None),
+           "jewelry":  lambda v: grammar.jewelry_forms(v) if pd.notna(v) else (None, None)}
+    for rk in GRAMMAR_RANKS:
+        for name in GRAMMAR_DIMS:
+            col = f"prop_{rk}_{name}"
+            forms = wide[col].map(fns[name]) if col in wide.columns else pd.Series([(None, None)] * len(wide))
+            wide[f"prop_{rk}_{name}_singular"] = forms.map(lambda t: t[0])
+            wide[f"prop_{rk}_{name}_plural"]   = forms.map(lambda t: t[1])
+
+    # WS3 spec: log unmapped jewelry types so the curated lookup can be extended
+    jw_cols = [f"prop_{rk}_jewelry" for rk in GRAMMAR_RANKS if f"prop_{rk}_jewelry" in wide.columns]
+    if jw_cols:
+        seen = pd.unique(wide[jw_cols].values.ravel())
+        unmapped = sorted({str(v) for v in seen if pd.notna(v) and grammar.unmapped_jewelry(v)})
+        if unmapped:
+            logger.warning(f"WS3 unmapped jewelry types ({len(unmapped)}) — extend JEWELRY_FORMS: {unmapped}")
+
+
+def build_v4_profiles(ranked_by_dim: dict, run_date: str, category_lookup=None) -> pd.DataFrame:
     """One row per email across all dimensions. ranked_by_dim: {dim_key: ranked DataFrame}."""
     frames = []
     for d in MULTI_DIMS + SINGLE_DIMS:
@@ -183,12 +238,8 @@ def build_v4_profiles(ranked_by_dim: dict, run_date: str) -> pd.DataFrame:
         frames.append(pivot)
 
     wide = pd.concat(frames, axis=1).reset_index().rename(columns={"index": "email"})
-
-    # legacy prop_N score/band = the Category dimension's per-rank score/band (back-compat)
-    for rk in range(1, _MAX_RANK + 1):
-        if f"prop_{rk}_Category_score" in wide.columns:
-            wide[f"prop_{rk}_score"] = wide[f"prop_{rk}_Category_score"]
-            wide[f"prop_{rk}_band"]  = wide[f"prop_{rk}_Category_band"]
+    wide = _suppress_incomplete(wide)          # drop dim_product-incomplete profiles (core-5)
+    _add_grammar_fields(wide, category_lookup)  # WS3 singular/plural display forms
 
     wide["prop_model_version"] = MODEL_VERSION
     wide["prop_scored_at"]     = run_date

@@ -23,9 +23,9 @@ PLACEHOLDERS = ("Not Available", "CWA")
 
 DIMENSIONS = [
     #          key              column                 top_n  field             exclude
-    Dimension("category",       "product_category",     3,    "Category",       PLACEHOLDERS),
+    Dimension("category",       "product_category",     3,    "category",       PLACEHOLDERS),
     Dimension("stone",          "stone_type",           3,    "stone",          PLACEHOLDERS),
-    Dimension("jewelry",        "jewelry_type",         3,    "Jewelry",        PLACEHOLDERS),
+    Dimension("jewelry",        "jewelry_type",         3,    "jewelry",        PLACEHOLDERS),
     Dimension("metal",          "metal_type",           3,    "metal",          PLACEHOLDERS),
     Dimension("stone_origin",   "lab_category",         1,    "stone_origin",   PLACEHOLDERS),
     Dimension("product_gender", "gender",               1,    "product_gender", PLACEHOLDERS),

@@ -149,7 +149,8 @@ def build_profiles_all_dims(country: str, run_date: str):
             ranked_by_dim[key] = artifacts.load_df(country, run_date, _ranked_name(key))
         except FileNotFoundError:
             logger.warning(f"ranked artifact missing for '{key}' — dimension will be absent from payload")
-    profiles = build_v4_profiles(ranked_by_dim, run_date)
+    category_lookup = read.get_category_lookup(country)          # WS3: category -> stone/jewelry parts
+    profiles = build_v4_profiles(ranked_by_dim, run_date, category_lookup=category_lookup)
     artifacts.save_df(profiles, country, run_date, _PROFILES)
 
 
