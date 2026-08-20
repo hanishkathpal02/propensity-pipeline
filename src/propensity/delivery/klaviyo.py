@@ -15,6 +15,7 @@ import numpy as np
 import requests
 
 from propensity.config.params import MODEL_VERSION
+from propensity.delivery.profiles import payload_columns
 from propensity.util import logger
 
 KLAVIYO_BULK_IMPORT_URL = "https://a.klaviyo.com/api/profile-bulk-import-jobs/"
@@ -23,21 +24,45 @@ KLAVIYO_API_VERSION = "2024-02-15"
 #   /data/attributes/profiles/data/<idx>/attributes/email
 _INVALID_EMAIL_PTR = re.compile(r"/data/attributes/profiles/data/(\d+)/attributes/email")
 BULK_MAX = 10_000                 # Klaviyo hard limit: profiles per bulk-import job
-_DIMS = ["score", "band", "stone", "Jewelry", "Category"]
+
+# Properties to send = every v4 payload field except the identifier / internal flag. Registry-driven
+# (via payload_columns) so new dimensions/grammar fields are sent automatically — no drift.
+_PROP_KEYS = [c for c in payload_columns() if c not in ("email", "valid_email")]
+_DATE_KEYS = {"prop_scored_at"}
+
+
+def _as_klaviyo_date(v):
+    """Klaviyo detects a property as a DATE only for a full ISO-8601 datetime string; a bare
+    'YYYY-MM-DD' comes through as a number. Expand date-only values to ISO-8601 datetime (UTC)."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    return s if "T" in s else f"{s}T00:00:00+00:00"
+
+
+def _native(v):
+    """Coerce numpy scalars to JSON-native python types (requests' json encoder needs native)."""
+    if isinstance(v, np.floating):
+        return None if np.isnan(v) else float(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    return v
 
 
 def _profile_properties(row: dict) -> dict:
-    """Custom `prop_*` properties for one profile. Missing ranks -> null (clears stale values)."""
+    """All v4 prop_* properties for one profile (registry-driven). Missing -> null (clears stale)."""
     props = {}
-    for rk in (1, 2, 3):
-        for dim in _DIMS:
-            val = row.get(f"prop_{rk}_{dim}")
-            missing = val is None or (isinstance(val, float) and np.isnan(val))
-            props[f"prop_{rk}_{dim}"] = None if missing else val
-    props["prop_model_version"] = row.get("prop_model_version", MODEL_VERSION)
-    props["prop_scored_at"]     = row.get("prop_scored_at")
-    props["test_bucket"]        = row.get("test_bucket")
-    props["propensity_source"]  = True   # flag so Klaviyo can identify propensity-pipeline profiles
+    for k in _PROP_KEYS:
+        v = row.get(k)
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            props[k] = None
+        elif k in _DATE_KEYS:
+            props[k] = _as_klaviyo_date(v)                 # ISO-8601 datetime so Klaviyo reads a date
+        else:
+            props[k] = _native(v)
+    props["propensity_source"] = True   # flag so Klaviyo can identify propensity-pipeline profiles
     return props
 
 
