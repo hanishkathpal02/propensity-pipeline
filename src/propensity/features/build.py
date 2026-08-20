@@ -163,3 +163,24 @@ def build_training_frame(raw: RawData, *, start_date, end_date,
     dist = df[label_col(label_window)].value_counts().to_dict()
     logger.info(f"Features built: {df.shape}; label distribution: {dist}")
     return df
+
+
+def build_scoring_frame(raw: RawData, *, as_of_date, lookback_days, label_window) -> pd.DataFrame:
+    """Features for a SINGLE as-of snapshot, NO future labels — for daily scoring with a saved model.
+
+    Reuses the exact `_build_snapshot` + `_clean` used in training (so there is no training/serving
+    skew), but builds only the `as_of_date` snapshot instead of the full grid, and skips labeling
+    (labels need future data and aren't needed to score). ~1/N the work of build_training_frame.
+    """
+    behavior   = raw.behavior.copy()
+    subscriber = raw.subscriber.copy()
+    klaviyo    = raw.klaviyo.copy()
+    behavior["date"]                = pd.to_datetime(behavior["date"])
+    subscriber["subscription_date"] = pd.to_datetime(subscriber["subscription_date"])
+    klaviyo["date"]                 = pd.to_datetime(klaviyo["date"])
+
+    sf = _build_snapshot(pd.Timestamp(as_of_date), behavior, subscriber, klaviyo, lookback_days)
+    sf[label_col(label_window)] = 0            # dummy: unused for scoring, keeps _clean uniform
+    df = _clean(sf, label_window)
+    logger.info(f"Scoring frame built: {df.shape} (as-of {as_of_date})")
+    return df

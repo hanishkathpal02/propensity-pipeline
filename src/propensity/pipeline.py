@@ -19,7 +19,7 @@ from propensity.delivery.banding import rank_and_band
 from propensity.delivery.klaviyo import sync_profiles_to_klaviyo
 from propensity.delivery.profiles import build_top3_profiles, build_v4_profiles
 from propensity.delivery.sync_log import log_sync_to_redshift
-from propensity.features.build import build_training_frame
+from propensity.features.build import build_scoring_frame, build_training_frame
 from propensity.io import artifacts, freshness, read
 from propensity.model.analysis import save_analysis
 from propensity.model.train import model_stats, train_model
@@ -131,8 +131,28 @@ def train_score_dim(country: str, run_date: str, dimension: str):
         df, train_end, mature_cutoff, params.LABEL_WINDOW, params.REFIT_ON_ALL_MATURE)
     stats = model_stats(eval_model, X_val, y_val, params.STATS_THRESHOLD)
     logger.info(f"[{dimension}] held-out AUC={stats['auc']:.4f} base_rate={stats['conversion_rate']*100:.2f}%")
-    artifacts.save_model(final_model, country, run_date, _model_name(dimension))
+    artifacts.save_model(final_model, country, run_date, _model_name(dimension))       # run-keyed (audit)
+    artifacts.save_current_model(final_model, country, _model_name(dimension))          # deployed (daily score)
     ranked = rank_and_band(scored, dim.top_n, dim_key=dimension)
+    artifacts.save_df(ranked, country, run_date, _ranked_name(dimension))
+
+
+def score_dim(country: str, run_date: str, dimension: str):
+    """DAILY score-only path: load the deployed model, build ONE as-of snapshot, score + rank + band.
+
+    No training — ~1/N the work of build_features_dim+train_score_dim. Requires a prior weekly
+    retrain to have written the current model (artifacts.save_current_model)."""
+    start, end, _, _ = _resolve_dates(run_date)
+    dim = get_dimension(dimension)
+    klaviyo    = artifacts.load_df(country, run_date, _SHARED_KLAVIYO)
+    subscriber = artifacts.load_df(country, run_date, _SHARED_SUBSCRIBER)
+    raw = read.get_dimension_data(country, start, end, dim, klaviyo=klaviyo, subscriber=subscriber)
+    df = build_scoring_frame(raw, as_of_date=end,
+                             lookback_days=params.LOOKBACK_WINDOW, label_window=params.LABEL_WINDOW)
+    model = artifacts.load_current_model(country, _model_name(dimension))
+    df["propensity_score"] = model.predict(df)
+    ranked = rank_and_band(df, dim.top_n, dim_key=dimension)
+    logger.info(f"[{dimension}] scored {len(df):,} (email,value) rows -> {len(ranked):,} ranked")
     artifacts.save_df(ranked, country, run_date, _ranked_name(dimension))
 
 

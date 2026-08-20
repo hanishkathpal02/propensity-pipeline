@@ -48,3 +48,24 @@ def load_model(country: str, run_date: str, name: str = "model.pkl"):
     path = ARTIFACTS_DIR / country / run_date / name
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+# --- "current" (deployed) models: NOT run-date-keyed, so the daily score path always loads the
+#     latest weekly retrain. The weekly DAG writes here; the daily-score DAG reads here. ---
+def _current_dir(country: str) -> Path:
+    d = ARTIFACTS_DIR / "current" / country
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_current_model(model, country: str, name: str) -> None:
+    path = _current_dir(country) / name
+    with open(path, "wb") as f:
+        pickle.dump(model, f)
+    logger.info(f"Saved current (deployed) model {path}")
+
+
+def load_current_model(country: str, name: str):
+    path = ARTIFACTS_DIR / "current" / country / name
+    with open(path, "rb") as f:
+        return pickle.load(f)

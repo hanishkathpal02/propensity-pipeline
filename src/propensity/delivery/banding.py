@@ -21,9 +21,16 @@ _KEYS = ["email", "propensity_category"]
 
 
 def _latest_per_pair(scored, score_col):
-    """Collapse the snapshot grid to one row per (email, value): the freshest snapshot's score."""
-    return (scored.sort_values("snapshot_date", ascending=False)
-                  .groupby(_KEYS, as_index=False).first()[_KEYS + [score_col]])
+    """One row per (email, value): take the FRESHEST snapshot, then the MAX score across that
+    snapshot's device/channel rows.
+
+    Max (not an arbitrary `.first()`) makes the collapse DETERMINISTIC — the weekly full-grid
+    build and the daily single-snapshot build then agree for the same customer — and it means
+    the delivered score = the customer's strongest observed intent for that value across their
+    touchpoints, rather than whichever device/channel row happened to sort first."""
+    freshest = scored.groupby(_KEYS)["snapshot_date"].transform("max")
+    latest = scored[scored["snapshot_date"] == freshest]
+    return latest.groupby(_KEYS, as_index=False)[score_col].max()
 
 
 def _rank_top_n(latest, top_n, score_col):
