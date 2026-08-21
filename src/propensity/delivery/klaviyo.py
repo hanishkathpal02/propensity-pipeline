@@ -24,6 +24,7 @@ KLAVIYO_API_VERSION = "2024-02-15"
 #   /data/attributes/profiles/data/<idx>/attributes/email
 _INVALID_EMAIL_PTR = re.compile(r"/data/attributes/profiles/data/(\d+)/attributes/email")
 BULK_MAX = 10_000                 # Klaviyo hard limit: profiles per bulk-import job
+MAX_BULK_BYTES = 4_500_000        # keep each job body under Klaviyo's 5MB request limit (413 otherwise)
 
 # Properties to send = every v4 payload field except the identifier / internal flag. Registry-driven
 # (via payload_columns) so new dimensions/grammar fields are sent automatically — no drift.
@@ -81,6 +82,23 @@ def _bulk_body(rows) -> dict:
     """A profile-bulk-import-job body wrapping up to BULK_MAX profiles."""
     return {"data": {"type": "profile-bulk-import-job",
                      "attributes": {"profiles": {"data": [_profile_obj(r) for r in rows]}}}}
+
+
+def _chunk_by_size(records, max_bytes: int, max_count: int):
+    """Split profiles into bulk jobs each under Klaviyo's request-size AND count limits.
+
+    The v4 payload is ~2KB/profile (67 properties), so a fixed count of 5,000 blew past the
+    5MB body limit -> 413. Sizing by the serialized profile keeps every job safe and adapts
+    automatically if the payload grows (more dimensions/fields)."""
+    chunks, cur, cur_bytes = [], [], 0
+    for r in records:
+        sz = len(json.dumps(_profile_obj(r)))
+        if cur and (cur_bytes + sz > max_bytes or len(cur) >= max_count):
+            chunks.append(cur); cur, cur_bytes = [], 0
+        cur.append(r); cur_bytes += sz
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def _submit_bulk(objs, headers, label, sleep, max_retries: int = 25):
@@ -159,10 +177,10 @@ def sync_profiles_to_klaviyo(df_profiles, api_key: str, dry_run: bool = True,
             logger.info(f"Excluded {skipped:,} invalid-email profiles (valid_email=False) before send")
     records = df_profiles.to_dict(orient="records")
     total = len(records)
-    batch_size = min(batch_size, BULK_MAX)
-    chunks = [records[i:i + batch_size] for i in range(0, total, batch_size)]
+    chunks = _chunk_by_size(records, MAX_BULK_BYTES, min(batch_size, BULK_MAX))
     mode = "[DRY RUN]" if dry_run else "[LIVE]"
-    logger.info(f"{mode} Klaviyo bulk sync — {total:,} profiles in {len(chunks)} job(s) of up to {batch_size:,}")
+    logger.info(f"{mode} Klaviyo bulk sync — {total:,} profiles in {len(chunks)} size-capped job(s) "
+                f"(<= {MAX_BULK_BYTES // 1_000_000}MB / {min(batch_size, BULK_MAX):,} profiles each)")
 
     if dry_run:
         if records:
