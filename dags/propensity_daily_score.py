@@ -60,6 +60,7 @@ with DAG(
     schedule="0 21 * * *",                       # 9 PM America/Los_Angeles (tz from start_date)
     start_date=pendulum.datetime(2024, 1, 1, tz="America/Los_Angeles"),
     catchup=False,
+    max_active_runs=1,                           # never run two copies at once (they collide on the fact loader)
     is_paused_upon_creation=True,                # stays OFF until go-live
     tags=["propensity", "daily"],
     default_args={"retries": 1, "retry_delay": pendulum.duration(minutes=5)},

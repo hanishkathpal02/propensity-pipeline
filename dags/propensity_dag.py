@@ -77,6 +77,7 @@ with DAG(
     schedule=None,                     # manual only (run ~every 14 days; dates resolved at run time)
     start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
     catchup=False,
+    max_active_runs=1,                 # never run two copies at once (they collide on the fact loaders)
     tags=["propensity"],
     default_args={"retries": 1, "retry_delay": pendulum.duration(minutes=5)},
 ) as dag:
