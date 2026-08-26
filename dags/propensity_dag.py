@@ -74,8 +74,8 @@ def _py(task_id, fn, pool=None, **extra_kwargs):
 
 with DAG(
     dag_id="propensity_pipeline",
-    schedule=None,                     # manual only (run ~every 14 days; dates resolved at run time)
-    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
+    schedule="0 6 * * 1",              # weekly retrain: Mondays 06:00 America/Los_Angeles
+    start_date=pendulum.datetime(2024, 1, 1, tz="America/Los_Angeles"),
     catchup=False,
     max_active_runs=1,                 # never run two copies at once (they collide on the fact loaders)
     tags=["propensity"],
